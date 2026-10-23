@@ -1,4 +1,4 @@
-/* Moana Coach Sportif — interactions (sans dépendance) */
+/* Moana Coach Sportif — interactions et animations (sans dépendance) */
 (function () {
   'use strict';
 
@@ -8,7 +8,89 @@
 
   var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   var saveData = !!(navigator.connection && navigator.connection.saveData);
+  var finePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
   var hasIO = 'IntersectionObserver' in window;
+  var anim = !reduceMotion;
+  if (anim) root.classList.add('anim');
+
+  /* ---------- Titres découpés en mots (pour l'effet « mots qui montent ») ---------- */
+  function splitWords(el) {
+    if (!el) return;
+    var i = 0;
+    var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    var nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(function (node) {
+      var frag = document.createDocumentFragment();
+      node.textContent.split(/([ \t\n\r]+)/).forEach(function (part) {
+        if (!part) return;
+        if (/^[ \t\n\r]+$/.test(part)) { frag.appendChild(document.createTextNode(' ')); return; }
+        var w = document.createElement('span');
+        var inner = document.createElement('span');
+        w.className = 'w';
+        inner.textContent = part;
+        inner.style.setProperty('--i', i++);
+        w.appendChild(inner);
+        frag.appendChild(w);
+      });
+      node.parentNode.replaceChild(frag, node);
+    });
+    el.classList.add('split');
+  }
+  var heroTitle = document.querySelector('.hero-title');
+  if (anim) {
+    splitWords(heroTitle);
+    document.querySelectorAll('.section-head h2, .contact-text h2').forEach(splitWords);
+  }
+
+  /* ---------- Écran de chargement ---------- */
+  function startHero() {
+    root.classList.remove('is-loading');
+    root.classList.add('is-loaded');
+    setTimeout(function () { if (heroTitle) heroTitle.classList.add('is-revealed'); }, anim ? 1250 : 0);
+  }
+
+  var loader = document.getElementById('loader');
+  if (loader) {
+    root.classList.add('is-loading');
+    var pctEl = document.getElementById('loader-pct');
+    var seen = false;
+    try { seen = sessionStorage.getItem('moana-loaded') === '1'; } catch (e) { /* stockage indisponible */ }
+    var MIN = reduceMotion ? 150 : (seen ? 450 : 950); // durée minimale d'affichage
+    var MAX = 4000;                                     // on n'attend jamais plus longtemps
+    var t0 = Date.now(), shown = 0, from = 0, finishAt = 0, ready = false, done = false;
+
+    var imgReady = function (src) {
+      return new Promise(function (res) { var im = new Image(); im.onload = im.onerror = res; im.src = src; });
+    };
+    var waits = [imgReady('assets/img/poster-hero.webp'), imgReady('assets/img/logo-moana-360.webp')];
+    if (document.fonts && document.fonts.ready) waits.push(document.fonts.ready);
+    Promise.all(waits).then(function () { ready = true; }, function () { ready = true; });
+
+    // Progression calculée sur le temps écoulé : reste juste même si l'onglet est en arrière-plan
+    var timer = setInterval(function () {
+      var now = Date.now(), elapsed = now - t0;
+      if (!finishAt && ((ready && elapsed >= MIN) || elapsed >= MAX)) { finishAt = now; from = shown; }
+      shown = finishAt
+        ? from + (100 - from) * Math.min(1, (now - finishAt) / 380)
+        : 88 * (1 - Math.exp(-elapsed / (MIN * .55)));
+      loader.style.setProperty('--p', (shown / 100).toFixed(3));
+      pctEl.textContent = Math.round(shown);
+      if (shown >= 100 && !done) {
+        done = true;
+        clearInterval(timer);
+        loader.classList.add('is-full');
+        try { sessionStorage.setItem('moana-loaded', '1'); } catch (e) { /* stockage indisponible */ }
+        setTimeout(function () {
+          loader.classList.add('is-done');
+          startHero();
+          setTimeout(function () { loader.remove(); }, 1100);
+        }, reduceMotion ? 0 : 260);
+      }
+    }, 30);
+  } else {
+    startHero();
+  }
 
   /* ---------- Lien WhatsApp avec message pré-rempli ---------- */
   var waGreeting = 'Bonjour Moana, je viens de ton site et j’aimerais réserver ma séance test offerte.';
@@ -16,19 +98,78 @@
     a.href = 'https://wa.me/' + PHONE_WA + '?text=' + encodeURIComponent(waGreeting);
   });
 
-  /* ---------- En-tête au scroll ---------- */
+  /* ---------- Défilement : en-tête, barre de lecture, parallaxe, bandeau ---------- */
   var header = document.getElementById('site-header');
-  var ticking = false;
-  function onScroll() {
-    if (ticking) return;
-    ticking = true;
-    requestAnimationFrame(function () {
-      header.classList.toggle('is-scrolled', window.scrollY > 20);
-      ticking = false;
+  var progressBar = document.getElementById('scroll-progress');
+  var hero = document.getElementById('hero');
+  var heroContent = document.querySelector('.hero-content');
+  var heroMedia = document.querySelector('.hero-media');
+  var heroFrame = document.querySelector('.hero-frame');
+  var drifts = Array.prototype.slice.call(document.querySelectorAll('[data-drift]'));
+  var ticker = document.querySelector('.ticker');
+  var tickerTrack = document.querySelector('.ticker-track');
+  var tickerAnim = anim && tickerTrack && tickerTrack.getAnimations ? tickerTrack.getAnimations()[0] : null;
+  var lastY = window.scrollY, lastT = performance.now(), tickerRate = 1, tickerDir = 1, rafId = 0;
+
+  function update() {
+    rafId = 0;
+    var y = window.scrollY, vh = window.innerHeight, now = performance.now();
+    header.classList.toggle('is-scrolled', y > 20);
+    var max = document.documentElement.scrollHeight - vh;
+    if (progressBar) progressBar.style.transform = 'scaleX(' + (max > 0 ? Math.min(1, y / max) : 0).toFixed(4) + ')';
+    if (!anim) return;
+
+    // Hero : le texte s'éloigne, la vidéo zoome légèrement
+    var hh = hero.offsetHeight;
+    if (y < hh) {
+      var k = y / hh;
+      heroContent.style.transform = 'translate3d(0,' + (y * .2).toFixed(1) + 'px,0)';
+      heroContent.style.opacity = Math.max(0, 1 - k * 1.1).toFixed(3);
+      if (heroMedia) heroMedia.style.transform = 'scale(' + (1 + k * .12).toFixed(4) + ')';
+      if (heroFrame) heroFrame.style.transform = 'translate3d(0,' + (y * -.08).toFixed(1) + 'px,0)';
+    }
+
+    // Grands mots en filigrane qui glissent avec le défilement
+    drifts.forEach(function (el) {
+      var r = el.parentNode.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > vh) return;
+      var p = (vh - r.top) / (vh + r.height);
+      el.style.transform = 'translate3d(' + ((.5 - p) * 40).toFixed(2) + '%,0,0)';
+    });
+
+    // Bandeau : accélère avec la vitesse de défilement et suit le sens
+    var v = (y - lastY) / Math.max(16, now - lastT);
+    if (Math.abs(v) > .05) tickerDir = v > 0 ? 1 : -1;
+    var target = tickerDir * (1 + Math.min(Math.abs(v) * 2.5, 5));
+    tickerRate += (target - tickerRate) * .12;
+    if (tickerAnim) tickerAnim.playbackRate = tickerRate;
+    if (ticker) ticker.style.setProperty('--sk', Math.max(-12, Math.min(12, (tickerRate - tickerDir) * -3)).toFixed(2) + 'deg');
+    lastY = y; lastT = now;
+    if (Math.abs(tickerRate - tickerDir) > .02) rafId = requestAnimationFrame(update); // retour en douceur
+  }
+  function onScroll() { if (!rafId) rafId = requestAnimationFrame(update); }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('resize', onScroll, { passive: true });
+  update();
+
+  /* ---------- Braises qui montent ---------- */
+  if (anim) {
+    document.querySelectorAll('[data-embers]').forEach(function (box) {
+      var n = parseInt(box.getAttribute('data-embers'), 10) || 10;
+      if (window.innerWidth < 640) n = Math.round(n * .6);
+      for (var i = 0; i < n; i++) {
+        var e = document.createElement('i');
+        e.style.cssText =
+          '--x:' + (Math.random() * 100).toFixed(1) + '%;' +
+          '--s:' + (3 + Math.random() * 6).toFixed(1) + 'px;' +
+          '--t:' + (7 + Math.random() * 7).toFixed(1) + 's;' +
+          '--dl:-' + (Math.random() * 14).toFixed(1) + 's;' +
+          '--dx:' + ((Math.random() - .5) * 120).toFixed(0) + 'px;' +
+          '--o:' + (.35 + Math.random() * .5).toFixed(2);
+        box.appendChild(e);
+      }
     });
   }
-  window.addEventListener('scroll', onScroll, { passive: true });
-  onScroll();
 
   /* ---------- Menu mobile ---------- */
   var burger = document.getElementById('burger');
@@ -80,7 +221,7 @@
 
   /* ---------- Apparitions au scroll ---------- */
   var reveals = document.querySelectorAll('.reveal');
-  if (hasIO && !reduceMotion) {
+  if (hasIO && anim) {
     var revealIO = new IntersectionObserver(function (entries) {
       entries.forEach(function (en) {
         if (en.isIntersecting) { en.target.classList.add('is-visible'); revealIO.unobserve(en.target); }
@@ -90,6 +231,20 @@
   } else {
     reveals.forEach(function (el) { el.classList.add('is-visible'); });
   }
+
+  /* ---------- Squelettes animés : retirés dès que la vignette est là ---------- */
+  document.querySelectorAll('.goal-media, .testi-media, .hero-frame-inner').forEach(function (wrap) {
+    var v = wrap.querySelector('video'), img = wrap.querySelector('img');
+    var ready = function () { wrap.classList.add('is-ready'); };
+    if (v && v.poster) {
+      var im = new Image(); im.onload = im.onerror = ready; im.src = v.poster;
+    } else if (img) {
+      if (img.complete && img.naturalWidth) ready();
+      else { img.addEventListener('load', ready); img.addEventListener('error', ready); }
+    } else {
+      ready();
+    }
+  });
 
   /* ---------- Vidéos : chargement différé + lecture seulement à l'écran ---------- */
   var videos = document.querySelectorAll('video[data-src]');
@@ -185,6 +340,7 @@
       });
       if (track.scrollLeft + track.clientWidth >= track.scrollWidth - 4) idx = slides.length - 1;
       dots.forEach(function (d, i) { d.setAttribute('aria-current', i === idx ? 'true' : 'false'); });
+      slides.forEach(function (s, i) { s.classList.toggle('is-current', i === idx); });
     }
     var raf = 0;
     track.addEventListener('scroll', function () {
@@ -193,6 +349,31 @@
     }, { passive: true });
     update();
   });
+
+  /* ---------- Ordinateur : cartes inclinables et boutons « aimantés » ---------- */
+  if (anim && finePointer) {
+    document.querySelectorAll('.goal').forEach(function (card) {
+      card.addEventListener('pointermove', function (e) {
+        var r = card.getBoundingClientRect();
+        var x = (e.clientX - r.left) / r.width - .5, y = (e.clientY - r.top) / r.height - .5;
+        card.classList.add('is-tilting');
+        card.style.transform = 'perspective(900px) rotateX(' + (-y * 8).toFixed(2) + 'deg) rotateY(' + (x * 10).toFixed(2) + 'deg) translateY(-6px)';
+        card.style.setProperty('--mx', ((x + .5) * 100).toFixed(1) + '%');
+        card.style.setProperty('--my', ((y + .5) * 100).toFixed(1) + '%');
+      });
+      card.addEventListener('pointerleave', function () {
+        card.classList.remove('is-tilting');
+        card.style.transform = '';
+      });
+    });
+    document.querySelectorAll('.btn-primary.btn-lg, .header-cta, .wa-float').forEach(function (b) {
+      b.addEventListener('pointermove', function (e) {
+        var r = b.getBoundingClientRect();
+        b.style.translate = ((e.clientX - r.left - r.width / 2) * .2).toFixed(1) + 'px ' + ((e.clientY - r.top - r.height / 2) * .3).toFixed(1) + 'px';
+      });
+      b.addEventListener('pointerleave', function () { b.style.translate = ''; });
+    });
+  }
 
   /* ---------- Navigation active (ordinateur) ---------- */
   var navLinks = document.querySelectorAll('.main-nav a');
@@ -220,7 +401,6 @@
   /* ---------- Barre d'actions mobile / bouton WhatsApp flottant ---------- */
   var actionBar = document.getElementById('action-bar');
   var waFloat = document.getElementById('wa-float');
-  var hero = document.getElementById('hero');
   var contact = document.getElementById('contact-form');
   var pastHero = false, inContact = false;
   function refreshBars() {
@@ -245,15 +425,21 @@
     var nameInput = form.querySelector('#cf-name');
     var nameField = nameInput.closest('.field');
     var goalField = form.querySelector('fieldset.field');
+    var submitBtn = form.querySelector('button[type="submit"]');
+    var submitLabel = submitBtn.innerHTML;
 
+    function flagError(field, on) {
+      field.classList.remove('has-error');
+      if (on) { void field.offsetWidth; field.classList.add('has-error'); } // relance la secousse
+    }
     function validate() {
-      var ok = true;
       var goal = form.querySelector('input[name="goal"]:checked');
-      nameField.classList.toggle('has-error', !nameInput.value.trim());
-      goalField.classList.toggle('has-error', !goal);
-      if (!nameInput.value.trim()) { ok = false; nameInput.focus(); }
-      else if (!goal) { ok = false; form.querySelector('input[name="goal"]').focus(); }
-      return ok;
+      var nameOk = !!nameInput.value.trim();
+      flagError(nameField, !nameOk);
+      flagError(goalField, !goal);
+      if (!nameOk) { nameInput.focus(); return false; }
+      if (!goal) { form.querySelector('input[name="goal"]').focus(); return false; }
+      return true;
     }
     nameInput.addEventListener('input', function () { if (nameInput.value.trim()) nameField.classList.remove('has-error'); });
     form.querySelectorAll('input[name="goal"]').forEach(function (r) {
@@ -271,6 +457,9 @@
         + 'Objectif : ' + goal + '\n'
         + 'Message : ' + (message || '-');
       window.open('https://wa.me/' + PHONE_WA + '?text=' + encodeURIComponent(text), '_blank', 'noopener');
+      submitBtn.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-check"/></svg>Ouverture de WhatsApp…';
+      submitBtn.classList.add('is-sent');
+      setTimeout(function () { submitBtn.innerHTML = submitLabel; submitBtn.classList.remove('is-sent'); }, 3000);
     });
   }
 })();
